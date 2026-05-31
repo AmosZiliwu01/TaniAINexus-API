@@ -1,4 +1,4 @@
-// db.service.js v2 — dengan normalisasi nomor WhatsApp
+// db.service.js v2 — dengan normalisasi nomor WhatsApp + notifikasi WA push
 import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
 
@@ -18,25 +18,23 @@ function log(fn, msg, extra = "") { console.log(`[DB:${fn}] ${msg}`, extra); }
 function err(fn, msg, e)          { console.error(`[DB:${fn}] ❌ ${msg}:`, e?.message ?? e); }
 
 // ──────────────────────────────────────────────────────────────
-// NORMALISASI NOMOR WA
+// NORMALISASI NOMOR WA (hilangkan @s.whatsapp.net)
 // ──────────────────────────────────────────────────────────────
 function normalizePhoneNumber(phoneNumber) {
   if (!phoneNumber) return phoneNumber;
-  // Hapus suffix @s.whatsapp.net (Baileys) dan sejenisnya
   return phoneNumber.replace(/@s\.whatsapp\.net$/, '').trim();
 }
 
 // ──────────────────────────────────────────────────────────────
-// EXISTING FUNCTIONS (dengan normalisasi)
+// PAIRING
 // ──────────────────────────────────────────────────────────────
-
 export async function generatePairingCode(userId) {
   try {
     await db().from("pairing_codes").delete().eq("user_id", userId).eq("used", false);
     const digits = crypto.randomInt(100000, 999999).toString();
     const code   = `TANI-${digits}`;
     const { error } = await db().from("pairing_codes").insert({
-      user_id:    userId,
+      user_id: userId,
       code,
       expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
     });
@@ -105,6 +103,9 @@ export async function unlinkWhatsapp(userId) {
   } catch (e) { err("unlinkWhatsapp", "Error", e); return false; }
 }
 
+// ──────────────────────────────────────────────────────────────
+// USER CONTEXT & CHAT
+// ──────────────────────────────────────────────────────────────
 export async function buildUserContext(userId) {
   try {
     const [profileRes, plantsRes, diagnosesRes, historyRes, communityRes, articlesRes] = await Promise.all([
@@ -123,9 +124,7 @@ export async function buildUserContext(userId) {
     const communityPosts= communityRes.data ?? [];
     const articles      = articlesRes.data  ?? [];
 
-    log("buildUserContext", `User ${profile.full_name || userId}`,
-        `plants:${plants.length} diag:${diagnoses.length} posts:${communityPosts.length}`);
-
+    log("buildUserContext", `User ${profile.full_name || userId}`, `plants:${plants.length} diag:${diagnoses.length} posts:${communityPosts.length}`);
     return { userId, profile, plants, diagnoses, chatHistory, communityPosts, articles };
   } catch (e) { err("buildUserContext", "Error", e); return null; }
 }
@@ -161,9 +160,8 @@ export async function getLatestArticles(limit = 5) {
 }
 
 // ══════════════════════════════════════════════════════════════
-// FUNGSI NOTIFIKASI WA PUSH (tidak berubah)
+// NOTIFIKASI WA PUSH
 // ══════════════════════════════════════════════════════════════
-
 function formatWaMessage(notif) {
   const emoji = {
     diagnosis:  "🔬",
