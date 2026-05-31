@@ -138,6 +138,57 @@ export async function saveChat({ userId, message, response, hasImage = false }) 
     log("saveChat", `Saved for user ${userId}`);
   } catch (e) { err("saveChat", "Gagal", e); }
 }
+// ──────────────────────────────────────────────────────────────
+// RATE LIMIT: 15 pesan WA per user per hari (reset jam 00.00)
+// ──────────────────────────────────────────────────────────────
+export async function checkAndIncrementDailyLimit(userId) {
+  try {
+    // Batas awal dan akhir hari ini (UTC+7 / WIB)
+    const now = new Date();
+    // Hitung awal hari di WIB (UTC+7): kurangi offset, ambil floor hari, tambah offset
+    const wibOffset = 7 * 60 * 60 * 1000;
+    const todayWibStart = new Date(Math.floor((now.getTime() + wibOffset) / 86400000) * 86400000 - wibOffset);
+    const todayWibEnd   = new Date(todayWibStart.getTime() + 86400000);
+
+    // Hitung pesan hari ini
+    const { count, error } = await db()
+      .from("whatsapp_chats")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", userId)
+      .gte("created_at", todayWibStart.toISOString())
+      .lt("created_at", todayWibEnd.toISOString());
+
+    if (error) throw error;
+
+    const dailyCount = count ?? 0;
+    const DAILY_LIMIT = 15;
+
+    log("checkDailyLimit", `User ${userId}: ${dailyCount}/${DAILY_LIMIT} pesan hari ini`);
+
+    if (dailyCount >= DAILY_LIMIT) {
+      // Hitung jam reset berikutnya (00.00 WIB besok)
+      const resetTime = todayWibEnd;
+      const hoursLeft = Math.ceil((resetTime.getTime() - now.getTime()) / 3600000);
+      return {
+        allowed: false,
+        count: dailyCount,
+        limit: DAILY_LIMIT,
+        resetMessage:
+          `⏳ Batas pesan harian kamu sudah tercapai (${DAILY_LIMIT} pesan/hari).\n\n` +
+          `Kuota akan direset dalam *${hoursLeft} jam* pada pukul *00.00 WIB*.\n\n` +
+          `Untuk kebutuhan mendesak, gunakan fitur AI di *https://tani-ai-nexus.vercel.app* 🌾`,
+      };
+    }
+
+    return { allowed: true, count: dailyCount, limit: DAILY_LIMIT };
+  } catch (e) {
+    err("checkDailyLimit", "Error", e);
+    // Jika error cek limit, izinkan pesan (fail open)
+    return { allowed: true, count: 0, limit: 15 };
+  }
+}
+
+
 
 export async function checkDbConnection() {
   try {
@@ -170,7 +221,7 @@ function formatWaMessage(notif) {
     info:       "📢",
     warning:    "⚠️",
   }[notif.type] || "🔔";
-  return `${emoji} *${notif.title}*\n\n${notif.body || ""}\n\n_Buka TaniAI Nexus untuk detail selengkapnya._`.trim();
+  return `${emoji} *${notif.title}*\n\n${notif.body || ""}\n\n_Buka TaniAI Nexus untuk detail selengkapnya._ `.trim();
 }
 
 export async function getPendingWaNotifications() {

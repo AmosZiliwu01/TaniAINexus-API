@@ -23,6 +23,7 @@ import {
   checkDbConnection,
   getPendingWaNotifications,
   markNotificationSent,
+  checkAndIncrementDailyLimit,
 }                                   from "./services/db.service.js";
 import pairingRouter                from "./services/pairing.service.js";
 
@@ -33,11 +34,14 @@ const PORT = process.env.PORT || 8080; // ✅ diubah dari 3000 menjadi 8080
 // MIDDLEWARE
 // ──────────────────────────────────────────────
 
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || "http://localhost:5173").split(",");
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || "http://localhost:5173").split(",").map(o => o.trim());
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+      if (!origin) return cb(null, true);
+      // Izinkan semua origin dari jaringan lokal (192.168.x.x, 10.x.x.x) saat development
+      const isLocal = /^http:\/\/(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+)(:\d+)?$/.test(origin);
+      if (isLocal || allowedOrigins.includes(origin)) return cb(null, true);
       cb(new Error(`CORS blocked: ${origin}`));
     },
     credentials: true,
@@ -188,6 +192,14 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
+    // ── Cek rate limit 10 pesan/hari ──────────────────────────
+    // Perintah LINK sudah dihandle sebelumnya, jadi di sini pasti bukan LINK
+    const limitCheck = await checkAndIncrementDailyLimit(waLink.user_id);
+    if (!limitCheck.allowed) {
+      console.log(`[API] Rate limit hit untuk user ${waLink.user_id}: ${limitCheck.count}/${limitCheck.limit}`);
+      return res.json({ success: true, reply: limitCheck.resetMessage });
+    }
+
     const reply = await askAI({
       text:        rawText,
       imageBase64: hasImage ? imageBase64 : null,
@@ -244,6 +256,10 @@ async function handleLinkCommand(code, phoneNumber, res) {
     success: true,
     reply:
       `✅ Berhasil! WhatsApp kamu sudah terhubung ke akun *${name}* di *TaniAI Nexus*.\n\n` +
+      `📌 *Info kuota harian:*\n` +
+      `• Maksimal *15 pesan/hari* via WhatsApp\n` +
+      `• Kuota reset otomatis setiap *00.00 WIB*\n` +
+      `• Butuh lebih? Gunakan TaniAI langsung di *https://tani-ai-nexus.vercel.app*\n\n` +
       `Sekarang kamu bisa langsung tanya masalah tanaman, kirim foto untuk diagnosa! 🌾\n\n` +
       `Coba tanya sekarang: _"Tanaman saya kenapa daunnya kuning?"_`,
   });
