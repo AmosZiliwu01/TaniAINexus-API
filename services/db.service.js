@@ -1,4 +1,4 @@
-// db.service.js v2 — tambah fungsi notifikasi WA push
+// db.service.js v2 — dengan normalisasi nomor WhatsApp
 import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
 
@@ -18,7 +18,16 @@ function log(fn, msg, extra = "") { console.log(`[DB:${fn}] ${msg}`, extra); }
 function err(fn, msg, e)          { console.error(`[DB:${fn}] ❌ ${msg}:`, e?.message ?? e); }
 
 // ──────────────────────────────────────────────────────────────
-// EXISTING FUNCTIONS (tidak diubah)
+// NORMALISASI NOMOR WA
+// ──────────────────────────────────────────────────────────────
+function normalizePhoneNumber(phoneNumber) {
+  if (!phoneNumber) return phoneNumber;
+  // Hapus suffix @s.whatsapp.net (Baileys) dan sejenisnya
+  return phoneNumber.replace(/@s\.whatsapp\.net$/, '').trim();
+}
+
+// ──────────────────────────────────────────────────────────────
+// EXISTING FUNCTIONS (dengan normalisasi)
 // ──────────────────────────────────────────────────────────────
 
 export async function generatePairingCode(userId) {
@@ -55,10 +64,11 @@ export async function validatePairingCode(code) {
 
 export async function getWhatsappLink(phoneNumber) {
   try {
+    const normalized = normalizePhoneNumber(phoneNumber);
     const { data, error } = await db()
       .from("whatsapp_links")
       .select("user_id, is_verified")
-      .eq("phone_number", phoneNumber)
+      .eq("phone_number", normalized)
       .eq("is_verified", true)
       .single();
     if (error || !data) return null;
@@ -68,19 +78,20 @@ export async function getWhatsappLink(phoneNumber) {
 
 export async function linkWhatsapp(userId, phoneNumber) {
   try {
+    const normalized = normalizePhoneNumber(phoneNumber);
     const { data: existing } = await db()
       .from("whatsapp_links")
       .select("user_id")
-      .eq("phone_number", phoneNumber)
+      .eq("phone_number", normalized)
       .neq("user_id", userId)
       .single();
     if (existing) return { success: false, message: "Nomor WhatsApp sudah terhubung ke akun lain." };
     const { error } = await db().from("whatsapp_links").upsert(
-      { user_id: userId, phone_number: phoneNumber, is_verified: true, linked_at: new Date().toISOString() },
+      { user_id: userId, phone_number: normalized, is_verified: true, linked_at: new Date().toISOString() },
       { onConflict: "user_id" }
     );
     if (error) throw error;
-    log("linkWhatsapp", `User ${userId} link WA: ${phoneNumber}`);
+    log("linkWhatsapp", `User ${userId} link WA: ${normalized}`);
     return { success: true, message: "WhatsApp berhasil dihubungkan!" };
   } catch (e) { err("linkWhatsapp", "Error", e); return { success: false, message: "Gagal menghubungkan WhatsApp." }; }
 }
@@ -150,13 +161,9 @@ export async function getLatestArticles(limit = 5) {
 }
 
 // ══════════════════════════════════════════════════════════════
-// FUNGSI BARU — NOTIFIKASI WA PUSH
+// FUNGSI NOTIFIKASI WA PUSH (tidak berubah)
 // ══════════════════════════════════════════════════════════════
 
-/**
- * Format pesan WA berdasarkan tipe notifikasi.
- * Menghasilkan teks yang ramah untuk dibaca di WhatsApp.
- */
 function formatWaMessage(notif) {
   const emoji = {
     diagnosis:  "🔬",
@@ -165,40 +172,21 @@ function formatWaMessage(notif) {
     info:       "📢",
     warning:    "⚠️",
   }[notif.type] || "🔔";
-
-  return (
-    `${emoji} *${notif.title}*\n\n` +
-    `${notif.body || ""}\n\n` +
-    `_Buka TaniAI Nexus untuk detail selengkapnya._`
-  ).trim();
+  return `${emoji} *${notif.title}*\n\n${notif.body || ""}\n\n_Buka TaniAI Nexus untuk detail selengkapnya._`.trim();
 }
 
-/**
- * Ambil notifikasi yang belum dikirim ke WhatsApp.
- *
- * Cara kerja:
- * - Join tabel notifications + whatsapp_links
- *   untuk dapat nomor HP user.
- * - Filter: is_read = false AND wa_sent = false
- *   (kolom wa_sent ditambahkan via SQL migration di bawah)
- *
- * Return: array { id, phone_number, title, message }
- */
 export async function getPendingWaNotifications() {
   try {
-    // Ambil notifikasi pending
     const { data: notifs, error } = await db()
       .from("notifications")
       .select("id, user_id, title, body, type, created_at")
       .eq("is_read", false)
-      .eq("wa_sent", false)          // kolom baru — lihat migration
+      .eq("wa_sent", false)
       .order("created_at", { ascending: true })
-      .limit(20);                    // maks 20 per poll
-
+      .limit(20);
     if (error) throw error;
     if (!notifs?.length) return [];
 
-    // Untuk setiap notifikasi, ambil nomor HP user
     const results = [];
     for (const notif of notifs) {
       const { data: link } = await db()
@@ -209,11 +197,9 @@ export async function getPendingWaNotifications() {
         .single();
 
       if (!link?.phone_number) {
-        // User tidak punya WA terhubung — tandai agar tidak di-poll terus
         await db().from("notifications").update({ wa_sent: true }).eq("id", notif.id);
         continue;
       }
-
       results.push({
         id:           notif.id,
         phone_number: link.phone_number,
@@ -221,16 +207,11 @@ export async function getPendingWaNotifications() {
         message:      formatWaMessage(notif),
       });
     }
-
     log("getPendingWaNotifications", `${results.length} notif siap dikirim WA`);
     return results;
   } catch (e) { err("getPendingWaNotifications", "Error", e); return []; }
 }
 
-/**
- * Tandai notifikasi sudah dikirim ke WA.
- * Dipanggil setelah WA bot berhasil kirim pesan.
- */
 export async function markNotificationSent(notifId) {
   try {
     const { error } = await db()
@@ -242,10 +223,6 @@ export async function markNotificationSent(notifId) {
   } catch (e) { err("markNotificationSent", "Error", e); }
 }
 
-/**
- * Buat notifikasi baru untuk user (dari server/admin/trigger).
- * Type: "diagnosis" | "community" | "market" | "info" | "warning"
- */
 export async function createNotification({ user_id, title, body, type = "info" }) {
   try {
     const { data, error } = await db()
