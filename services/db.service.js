@@ -200,10 +200,33 @@ export async function saveChat({ userId, message, response, hasImage = false }) 
 
 export async function checkAndIncrementDailyLimit(userId) {
   try {
-    return { allowed: true, count: 0, limit: "unlimited" };
+    const today = new Date().toISOString().split("T")[0]; // "2026-06-02"
+
+    const { data, error } = await db()
+      .from("whatsapp_chats")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", userId)
+      .gte("created_at", `${today}T00:00:00.000Z`)
+      .lte("created_at", `${today}T23:59:59.999Z`);
+
+    if (error) throw error;
+
+    const count = data ?? 0;
+    const DAILY_LIMIT = 15;
+
+    if (count >= DAILY_LIMIT) {
+      return {
+        allowed: false,
+        count,
+        limit: DAILY_LIMIT,
+        resetMessage: `⚠️ Kamu sudah mencapai batas ${DAILY_LIMIT} pesan hari ini.\n\nBatas akan direset besok pukul 00.00. Sampai jumpa besok! 🌾`,
+      };
+    }
+
+    return { allowed: true, count, limit: DAILY_LIMIT };
   } catch (e) {
     err("checkDailyLimit", "Error", e);
-    return { allowed: true, count: 0, limit: "unlimited" };
+    return { allowed: true, count: 0, limit: 15 };
   }
 }
 
