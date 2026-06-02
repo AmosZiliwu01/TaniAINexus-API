@@ -108,10 +108,10 @@ app.post("/api/chat", async (req, res) => {
 
       const ctx = await buildUserContext(userId);
       const name = ctx?.profile?.full_name || "Petani";
-     return res.json({
-      success: true,
-      reply: `✅ Berhasil! WhatsApp kamu sudah terhubung ke akun *${name}* di *TaniAI Nexus*.\n\n🌾 Sekarang kamu bisa tanya masalah tanaman atau kirim foto untuk diagnosa!\n\n📊 *Info penggunaan:*\n• Batas pesan: *15 pesan per hari*\n• Reset setiap hari pukul 00.00 WIB\n\nCoba tanya: _"Tanaman saya kenapa daunnya kuning?"_`,
-    });
+      return res.json({
+        success: true,
+        reply: `✅ Berhasil! WhatsApp kamu sudah terhubung ke akun *${name}* di *TaniAI Nexus*.\n\n🌾 Sekarang kamu bisa tanya masalah tanaman atau kirim foto untuk diagnosa!\n\n📊 *Info penggunaan:*\n• Batas pesan: *15 pesan per hari*\n• Reset setiap hari pukul 00.00 WIB\n\nCoba tanya: _"Tanaman saya kenapa daunnya kuning?"_`,
+      });
     }
 
     const waLink = await getWhatsappLink(phoneNumber);
@@ -130,13 +130,11 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-  const limitCheck = await checkAndIncrementDailyLimit(waLink.user_id);
-  if (!limitCheck.allowed) {
-    return res.json({
-      success: true,
-      reply: `🚫 *Batas Pesan Harian Tercapai*\n\nKamu sudah menggunakan *${limitCheck.count}/${limitCheck.limit} pesan* hari ini.\n\n⏰ Batas akan direset besok pukul *00.00 WIB*.\n\nTerima kasih sudah menggunakan *TaniAI Nexus*! 🌾`,
-    });
-  }
+    const limitCheck = await checkAndIncrementDailyLimit(waLink.user_id);
+    if (!limitCheck.allowed) {
+      console.log(`[API] Rate limit hit untuk user ${waLink.user_id}: ${limitCheck.count}/${limitCheck.limit}`);
+      return res.json({ success: true, reply: limitCheck.resetMessage });
+    }
 
     const reply = await askAI({
       text: rawText,
@@ -145,12 +143,12 @@ app.post("/api/chat", async (req, res) => {
       isLinked: true,
     });
 
-    saveChat({
+    await saveChat({
       userId: waLink.user_id,
       message: hasText ? rawText : "[gambar]",
       response: reply,
       hasImage,
-    }).catch((e) => console.error("[API] saveChat error:", e.message));
+    });
 
     return res.json({ success: true, reply });
   } catch (e) {

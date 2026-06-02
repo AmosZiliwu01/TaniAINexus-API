@@ -192,40 +192,58 @@ export async function buildUserContext(userId) {
 export async function saveChat({ userId, message, response, hasImage = false }) {
   try {
     const { error } = await db().from("whatsapp_chats").insert({
-      user_id: userId, message, response, has_image: hasImage,
+      user_id: userId,
+      message: message.substring(0, 500),
+      response: response.substring(0, 2000),
+      has_image: hasImage,
+      created_at: new Date().toISOString(),
     });
     if (error) throw error;
-  } catch (e) { err("saveChat", "Gagal", e); }
+    console.log(`[saveChat] Chat saved for user ${userId}`);
+  } catch (e) { 
+    console.error("[saveChat] Error:", e); 
+  }
 }
 
 export async function checkAndIncrementDailyLimit(userId) {
   try {
-    const today = new Date().toISOString().split("T")[0]; // "2026-06-02"
-
-    const { data, error } = await db()
+    const now = new Date();
+    const wibOffset = 7 * 60 * 60 * 1000;
+    const todayStart = new Date(Math.floor((now.getTime() + wibOffset) / 86400000) * 86400000 - wibOffset);
+    const todayEnd = new Date(todayStart.getTime() + 86400000);
+    
+    const { count, error } = await db()
       .from("whatsapp_chats")
-      .select("id", { count: "exact", head: true })
+      .select("*", { count: "exact", head: true })
       .eq("user_id", userId)
-      .gte("created_at", `${today}T00:00:00.000Z`)
-      .lte("created_at", `${today}T23:59:59.999Z`);
-
+      .gte("created_at", todayStart.toISOString())
+      .lt("created_at", todayEnd.toISOString());
+    
     if (error) throw error;
-
-    const count = data ?? 0;
+    
     const DAILY_LIMIT = 15;
-
-    if (count >= DAILY_LIMIT) {
+    const currentCount = count || 0;
+    
+    console.log(`[RateLimit] User ${userId}: ${currentCount}/${DAILY_LIMIT} pesan hari ini`);
+    
+    if (currentCount >= DAILY_LIMIT) {
+      const hoursLeft = Math.ceil((todayEnd.getTime() - now.getTime()) / 3600000);
       return {
         allowed: false,
-        count,
+        count: currentCount,
         limit: DAILY_LIMIT,
-        resetMessage: `⚠️ Kamu sudah mencapai batas ${DAILY_LIMIT} pesan hari ini.\n\nBatas akan direset besok pukul 00.00. Sampai jumpa besok! 🌾`,
+        resetMessage: `🚫 *Batas Pesan Harian Tercapai*\n\nKamu sudah menggunakan *${currentCount}/${DAILY_LIMIT} pesan* hari ini.\n\n⏰ Kuota akan direset dalam *${hoursLeft} jam* pada pukul *00.00 WIB*.\n\n💡 Untuk keperluan cepat, Langsung akses https://tani-ai-nexus.vercel.app\n\nTerima kasih sudah menggunakan *TaniAI Nexus*! 🌾`,
       };
     }
-
-    return { allowed: true, count, limit: DAILY_LIMIT };
+    
+    return { 
+      allowed: true, 
+      count: currentCount, 
+      limit: DAILY_LIMIT 
+    };
+    
   } catch (e) {
-    err("checkDailyLimit", "Error", e);
+    console.error("[RateLimit] Error:", e);
     return { allowed: true, count: 0, limit: 15 };
   }
 }
@@ -314,27 +332,10 @@ function formatGenericNotification(title, body) {
   return `🔔 *${title}*\n\n${cleanBody.substring(0, 300)}`;
 }
 
-// ============================================================
-// PERBAIKAN UTAMA: Filter + Duplicate Prevention
-// ============================================================
-
-/**
- * Tipe notif yang BOLEH dikirim ke WA:
- * - "community"  : komentar pada post user (non-report, selalu boleh)
- * - "warning"    : user mendapat peringatan dari admin (boleh, karena admin sudah approve action)
- * - "report"     : laporan ke admin — HANYA jika is_admin_action_required = true
- *
- * Notif tipe "report" yang dibuat dari user → post admin (pending_review)
- * TIDAK akan punya is_admin_action_required = true sehingga tidak akan dikirim ke WA.
- *
- * Notif tipe lain (info, success, dll.) — tidak dikirim ke WA secara default
- * kecuali is_admin_action_required = true.
- */
 const WA_ALLOWED_TYPES = new Set(["community", "warning", "report"]);
 
 export async function getPendingWaNotifications() {
   try {
-    // Ambil notif pending — tambah filter is_admin_action_required untuk tipe report
     const { data: notifs, error } = await db()
       .from("notifications")
       .select("id, user_id, title, body, type, is_admin_action_required, created_at")
@@ -349,22 +350,17 @@ export async function getPendingWaNotifications() {
     const results = [];
 
     for (const notif of notifs) {
-      // --- FILTER 1: Tipe harus masuk daftar yang diizinkan ---
       if (!WA_ALLOWED_TYPES.has(notif.type)) {
         console.log(`[DB] ⏭️  Notif #${notif.id} tipe "${notif.type}" dilewati (tidak perlu WA)`);
         continue;
       }
 
-      // --- FILTER 2: Notif tipe "report" HARUS punya is_admin_action_required = true ---
-      // Ini memastikan laporan user biasa (pending_review) tidak terkirim ke WA
       if (notif.type === "report" && notif.is_admin_action_required !== true) {
         console.log(`[DB] ⏭️  Notif #${notif.id} tipe "report" dilewati (is_admin_action_required=false)`);
-        // Mark wa_sent=true agar tidak diproses ulang di masa depan
         await db().from("notifications").update({ wa_sent: true }).eq("id", notif.id);
         continue;
       }
 
-      // --- FILTER 3: Cek apakah user punya nomor WA terdaftar ---
       const { data: link } = await db()
         .from("whatsapp_links")
         .select("phone_number")
@@ -373,13 +369,11 @@ export async function getPendingWaNotifications() {
         .single();
 
       if (!link?.phone_number) {
-        // User tidak punya WA terhubung — mark sent agar tidak loop terus
         console.log(`[DB] ⏭️  Notif #${notif.id} — user ${notif.user_id} tidak punya WA terhubung`);
         await db().from("notifications").update({ wa_sent: true }).eq("id", notif.id);
         continue;
       }
 
-      // --- FORMAT PESAN ---
       const parsedBody = parseNotifBody(notif.body);
       let message = "";
       if (notif.type === "community") message = formatCommentNotification(parsedBody);
@@ -407,17 +401,11 @@ export async function markNotificationSent(notifId) {
       .from("notifications")
       .update({ wa_sent: true, is_read: true })
       .eq("id", notifId)
-      // Hanya update jika belum pernah di-mark — cegah duplicate send
       .eq("wa_sent", false);
     if (error) throw error;
   } catch (e) { err("markNotificationSent", "Error", e); }
 }
 
-/**
- * createNotification — untuk notifikasi umum (community comment, info, dsb.)
- * is_admin_action_required default false — tidak akan dikirim ke WA kecuali
- * diset true secara eksplisit.
- */
 export async function createNotification({ user_id, title, body, type = "info", is_admin_action_required = false }) {
   try {
     const { data, error } = await db()
@@ -438,20 +426,8 @@ export async function createNotification({ user_id, title, body, type = "info", 
   } catch (e) { err("createNotification", "Error", e); return null; }
 }
 
-/**
- * createReportNotification — HANYA untuk laporan yang sudah diproses admin
- * dan membutuhkan tindakan (approved_admin_action).
- *
- * Laporan baru dari user (pending_review) TIDAK memanggil fungsi ini —
- * mereka hanya masuk tabel reports, notifikasi web saja.
- *
- * Gunakan is_admin_action_required=true agar masuk queue WA.
- */
 export async function createReportNotification({ title, body, reportStatus = "pending_review" }) {
   try {
-    // Safety: hanya kirim WA untuk laporan yang membutuhkan aksi admin segera
-    // Status "pending_review" = laporan baru dari user, belum perlu notif WA
-    // Status "approved_admin_action" = admin sudah setuju, perlu aksi lanjut
     const ALLOWED_STATUSES_FOR_WA = ["approved_admin_action", "needs_immediate_action"];
     const shouldSendWA = ALLOWED_STATUSES_FOR_WA.includes(reportStatus);
 
@@ -465,7 +441,7 @@ export async function createReportNotification({ title, body, reportStatus = "pe
       return null;
     }
 
-    const admin = admins[0]; // satu admin
+    const admin = admins[0];
 
     const { data, error } = await db()
       .from("notifications")
@@ -476,7 +452,7 @@ export async function createReportNotification({ title, body, reportStatus = "pe
         type: "report",
         wa_sent: false,
         is_read: false,
-        is_admin_action_required: shouldSendWA, // ← kunci filter WA
+        is_admin_action_required: shouldSendWA,
       })
       .select()
       .single();
