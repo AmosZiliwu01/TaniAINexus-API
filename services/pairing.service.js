@@ -7,13 +7,13 @@ import {
 
 const router = Router();
 
+// Verifikasi JWT dari Authorization header, return user atau null
 async function getAuthUser(req) {
   const authHeader = req.headers.authorization ?? "";
   const token = authHeader.replace("Bearer ", "").trim();
 
   if (!token) return null;
 
-  // Gunakan anon client untuk verifikasi JWT (bukan service_role)
   const anonClient = createClient(
     process.env.SUPABASE_URL,
     process.env.SUPABASE_ANON_KEY
@@ -59,7 +59,7 @@ router.get("/status", async (req, res) => {
       return res.status(401).json({ success: false, message: "Tidak terautentikasi" });
     }
 
-    // Gunakan service_role untuk baca whatsapp_links (bypass RLS)
+    // Bypass RLS dengan service_role untuk baca whatsapp_links
     const serviceDb = createClient(
       process.env.SUPABASE_URL,
       process.env.SUPABASE_SERVICE_ROLE_KEY,

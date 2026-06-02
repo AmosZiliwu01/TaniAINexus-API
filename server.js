@@ -18,6 +18,7 @@ import pairingRouter from "./services/pairing.service.js";
 const app = express();
 const PORT = process.env.PORT || 8080;
 
+// Whitelist origin untuk CORS
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "http://localhost:5173").split(",").map(o => o.trim());
 app.use(cors({
   origin: (origin, cb) => {
@@ -49,6 +50,7 @@ app.get("/health", async (_req, res) => {
 
 app.use("/api/pairing", pairingRouter);
 
+// Ambil notifikasi pending untuk dikirim bot WA
 app.get("/api/notifications/pending", async (req, res) => {
   try {
     const apiKey = req.headers["x-api-key"];
@@ -75,6 +77,7 @@ app.post("/api/notifications/mark-sent", async (req, res) => {
   }
 });
 
+// Handler utama chat: pairing, cek link WA, rate limit, lalu tanya AI
 app.post("/api/chat", async (req, res) => {
   try {
     const { text = "", imageBase64 = null, phoneNumber = null } = req.body;
