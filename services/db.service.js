@@ -1,4 +1,3 @@
-// db.service.js v2 — dengan normalisasi nomor WhatsApp + notifikasi WA push
 import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
 
@@ -14,32 +13,28 @@ function db() {
   return _client;
 }
 
-function log(fn, msg, extra = "") { console.log(`[DB:${fn}] ${msg}`, extra); }
-function err(fn, msg, e)          { console.error(`[DB:${fn}] ❌ ${msg}:`, e?.message ?? e); }
+function err(fn, msg, e) { console.error(`[DB:${fn}] ❌ ${msg}:`, e?.message ?? e); }
 
-// ──────────────────────────────────────────────────────────────
-// NORMALISASI NOMOR WA (hilangkan @s.whatsapp.net)
-// ──────────────────────────────────────────────────────────────
-function normalizePhoneNumber(phoneNumber) {
-  if (!phoneNumber) return phoneNumber;
-  return phoneNumber.replace(/@s\.whatsapp\.net$/, '').trim();
+function cleanNumber(raw) {
+  let n = String(raw || "")
+    .replace(/@s\.whatsapp\.net$|@lid$|@c\.us$/g, "")
+    .replace(/[^0-9]/g, "");
+  if (!n) return null;
+  if (n.startsWith("0")) n = "62" + n.substring(1);
+  else if (!n.startsWith("62") && n.length >= 10 && n.length <= 13) n = "62" + n;
+  return n;
 }
 
-// ──────────────────────────────────────────────────────────────
-// PAIRING
-// ──────────────────────────────────────────────────────────────
 export async function generatePairingCode(userId) {
   try {
     await db().from("pairing_codes").delete().eq("user_id", userId).eq("used", false);
-    const digits = crypto.randomInt(100000, 999999).toString();
-    const code   = `TANI-${digits}`;
+    const code = `TANI-${crypto.randomInt(100000, 999999)}`;
     const { error } = await db().from("pairing_codes").insert({
       user_id: userId,
       code,
-      expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+      expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
     });
     if (error) throw error;
-    log("generatePairingCode", `Kode untuk user ${userId}: ${code}`);
     return code;
   } catch (e) { err("generatePairingCode", "Gagal", e); return null; }
 }
@@ -51,61 +46,127 @@ export async function validatePairingCode(code) {
       .select("id, user_id, expires_at, used")
       .eq("code", code.toUpperCase())
       .single();
-    if (error || !data)           { log("validatePairingCode", `Tidak ditemukan: ${code}`); return null; }
-    if (data.used)                { log("validatePairingCode", `Sudah dipakai: ${code}`);   return null; }
-    if (new Date(data.expires_at) < new Date()) { log("validatePairingCode", `Expired: ${code}`); return null; }
+    if (error || !data || data.used) return null;
+    if (new Date(data.expires_at) < new Date()) return null;
     await db().from("pairing_codes").update({ used: true }).eq("id", data.id);
-    log("validatePairingCode", `Valid untuk user: ${data.user_id}`);
     return data.user_id;
   } catch (e) { err("validatePairingCode", "Error", e); return null; }
 }
 
-export async function getWhatsappLink(phoneNumber) {
+export async function getWhatsappLinkByPhone(phoneNumber) {
   try {
-    const normalized = normalizePhoneNumber(phoneNumber);
+    const cleaned = cleanNumber(phoneNumber);
+    if (!cleaned) return null;
+
     const { data, error } = await db()
       .from("whatsapp_links")
-      .select("user_id, is_verified")
-      .eq("phone_number", normalized)
+      .select("user_id, phone_number, is_verified")
+      .eq("phone_number", cleaned)
+      .eq("is_verified", true)
+      .single();
+
+    if (error || !data) return null;
+    return data;
+  } catch (e) {
+    console.error("[DB] getWhatsappLinkByPhone error:", e);
+    return null;
+  }
+}
+
+export async function getWhatsappLinkByUserId(userId) {
+  try {
+    const { data, error } = await db()
+      .from("whatsapp_links")
+      .select("user_id, phone_number, is_verified")
+      .eq("user_id", userId)
       .eq("is_verified", true)
       .single();
     if (error || !data) return null;
     return data;
-  } catch (e) { err("getWhatsappLink", "Error", e); return null; }
+  } catch (e) {
+    err("getWhatsappLinkByUserId", "Error", e);
+    return null;
+  }
 }
+
+export { getWhatsappLinkByPhone as getWhatsappLink };
 
 export async function linkWhatsapp(userId, phoneNumber) {
   try {
-    const normalized = normalizePhoneNumber(phoneNumber);
+    const cleaned = cleanNumber(phoneNumber);
+    if (!cleaned) return { success: false, message: "Nomor WhatsApp tidak valid" };
+
     const { data: existing } = await db()
       .from("whatsapp_links")
       .select("user_id")
-      .eq("phone_number", normalized)
+      .eq("phone_number", cleaned)
       .neq("user_id", userId)
       .single();
+
     if (existing) return { success: false, message: "Nomor WhatsApp sudah terhubung ke akun lain." };
+
     const { error } = await db().from("whatsapp_links").upsert(
-      { user_id: userId, phone_number: normalized, is_verified: true, linked_at: new Date().toISOString() },
+      { user_id: userId, phone_number: cleaned, is_verified: true, linked_at: new Date().toISOString() },
       { onConflict: "user_id" }
     );
+
     if (error) throw error;
-    log("linkWhatsapp", `User ${userId} link WA: ${normalized}`);
     return { success: true, message: "WhatsApp berhasil dihubungkan!" };
-  } catch (e) { err("linkWhatsapp", "Error", e); return { success: false, message: "Gagal menghubungkan WhatsApp." }; }
+  } catch (e) {
+    return { success: false, message: "Gagal menghubungkan WhatsApp." };
+  }
+}
+
+export async function updateWhatsappPhoneByUserId(userId, rawPhone) {
+  try {
+    const cleaned = cleanNumber(rawPhone);
+    if (!cleaned) return { success: false, message: "Format nomor tidak valid" };
+
+    const { data: conflict } = await db()
+      .from("whatsapp_links")
+      .select("user_id")
+      .eq("phone_number", cleaned)
+      .neq("user_id", userId)
+      .maybeSingle();
+
+    if (conflict) return { success: false, message: "Nomor sudah dipakai akun lain" };
+
+    const { error } = await db()
+      .from("whatsapp_links")
+      .update({ phone_number: cleaned })
+      .eq("user_id", userId);
+    if (error) throw error;
+    return { success: true };
+  } catch (e) { err("updateWhatsappPhoneByUserId", "Error", e); return { success: false, message: "Gagal update nomor" }; }
 }
 
 export async function unlinkWhatsapp(userId) {
   try {
     const { error } = await db().from("whatsapp_links").delete().eq("user_id", userId);
     if (error) throw error;
-    log("unlinkWhatsapp", `User ${userId} unlink WA`);
     return true;
   } catch (e) { err("unlinkWhatsapp", "Error", e); return false; }
 }
 
-// ──────────────────────────────────────────────────────────────
-// USER CONTEXT & CHAT
-// ──────────────────────────────────────────────────────────────
+export async function getAdminWhatsAppNumbers() {
+  try {
+    const { data: adminRoles, error: rolesErr } = await db()
+      .from("user_roles")
+      .select("user_id")
+      .eq("role", "admin");
+    if (rolesErr || !adminRoles?.length) return [];
+
+    const adminIds = adminRoles.map(r => r.user_id);
+    const { data, error } = await db()
+      .from("whatsapp_links")
+      .select("user_id, phone_number")
+      .in("user_id", adminIds)
+      .eq("is_verified", true);
+    if (error) throw error;
+    return data || [];
+  } catch (e) { err("getAdminWhatsAppNumbers", "Error", e); return []; }
+}
+
 export async function buildUserContext(userId) {
   try {
     const [profileRes, plantsRes, diagnosesRes, historyRes, communityRes, articlesRes] = await Promise.all([
@@ -114,18 +175,17 @@ export async function buildUserContext(userId) {
       db().from("plant_diagnoses").select("plant_type, diagnosis, severity, created_at").eq("user_id", userId).order("created_at", { ascending: false }).limit(5),
       db().from("whatsapp_chats").select("message, response, created_at").eq("user_id", userId).order("created_at", { ascending: false }).limit(6),
       db().from("community_posts").select("title, category, likes_count, comments_count, created_at").eq("user_id", userId).order("created_at", { ascending: false }).limit(3),
-      db().from("articles").select("title, slug, excerpt, content, category, published, created_at").eq("published", true).order("created_at", { ascending: false }).limit(5),
+      db().from("articles").select("title, slug, excerpt, content, published, created_at").eq("published", true).order("created_at", { ascending: false }).limit(5),
     ]);
-
-    const profile       = profileRes.data  ?? {};
-    const plants        = plantsRes.data   ?? [];
-    const diagnoses     = diagnosesRes.data ?? [];
-    const chatHistory   = (historyRes.data ?? []).reverse();
-    const communityPosts= communityRes.data ?? [];
-    const articles      = articlesRes.data  ?? [];
-
-    log("buildUserContext", `User ${profile.full_name || userId}`, `plants:${plants.length} diag:${diagnoses.length} posts:${communityPosts.length}`);
-    return { userId, profile, plants, diagnoses, chatHistory, communityPosts, articles };
+    return {
+      userId,
+      profile: profileRes.data ?? {},
+      plants: plantsRes.data ?? [],
+      diagnoses: diagnosesRes.data ?? [],
+      chatHistory: (historyRes.data ?? []).reverse(),
+      communityPosts: communityRes.data ?? [],
+      articles: articlesRes.data ?? [],
+    };
   } catch (e) { err("buildUserContext", "Error", e); return null; }
 }
 
@@ -135,60 +195,17 @@ export async function saveChat({ userId, message, response, hasImage = false }) 
       user_id: userId, message, response, has_image: hasImage,
     });
     if (error) throw error;
-    log("saveChat", `Saved for user ${userId}`);
   } catch (e) { err("saveChat", "Gagal", e); }
 }
-// ──────────────────────────────────────────────────────────────
-// RATE LIMIT: 15 pesan WA per user per hari (reset jam 00.00)
-// ──────────────────────────────────────────────────────────────
+
 export async function checkAndIncrementDailyLimit(userId) {
   try {
-    // Batas awal dan akhir hari ini (UTC+7 / WIB)
-    const now = new Date();
-    // Hitung awal hari di WIB (UTC+7): kurangi offset, ambil floor hari, tambah offset
-    const wibOffset = 7 * 60 * 60 * 1000;
-    const todayWibStart = new Date(Math.floor((now.getTime() + wibOffset) / 86400000) * 86400000 - wibOffset);
-    const todayWibEnd   = new Date(todayWibStart.getTime() + 86400000);
-
-    // Hitung pesan hari ini
-    const { count, error } = await db()
-      .from("whatsapp_chats")
-      .select("*", { count: "exact", head: true })
-      .eq("user_id", userId)
-      .gte("created_at", todayWibStart.toISOString())
-      .lt("created_at", todayWibEnd.toISOString());
-
-    if (error) throw error;
-
-    const dailyCount = count ?? 0;
-    const DAILY_LIMIT = 15;
-
-    log("checkDailyLimit", `User ${userId}: ${dailyCount}/${DAILY_LIMIT} pesan hari ini`);
-
-    if (dailyCount >= DAILY_LIMIT) {
-      // Hitung jam reset berikutnya (00.00 WIB besok)
-      const resetTime = todayWibEnd;
-      const hoursLeft = Math.ceil((resetTime.getTime() - now.getTime()) / 3600000);
-      return {
-        allowed: false,
-        count: dailyCount,
-        limit: DAILY_LIMIT,
-        resetMessage:
-          `⏳ Batas pesan harian kamu sudah tercapai (${DAILY_LIMIT} pesan/hari).\n\n` +
-          `Kuota akan direset dalam *${hoursLeft} jam* pada pukul *00.00 WIB*.\n\n` +
-          `Untuk kebutuhan mendesak, gunakan fitur AI di *https://tani-ai-nexus.vercel.app* 🌾`,
-      };
-    }
-
-    return { allowed: true, count: dailyCount, limit: DAILY_LIMIT };
+    return { allowed: true, count: 0, limit: "unlimited" };
   } catch (e) {
     err("checkDailyLimit", "Error", e);
-    // Jika error cek limit, izinkan pesan (fail open)
-    return { allowed: true, count: 0, limit: 15 };
+    return { allowed: true, count: 0, limit: "unlimited" };
   }
 }
-
-
 
 export async function checkDbConnection() {
   try {
@@ -201,7 +218,7 @@ export async function getLatestArticles(limit = 5) {
   try {
     const { data, error } = await db()
       .from("articles")
-      .select("title, slug, excerpt, content, published, created_at, category")
+      .select("title, slug, excerpt, content, published, created_at")
       .eq("published", true)
       .order("created_at", { ascending: false })
       .limit(limit);
@@ -210,18 +227,68 @@ export async function getLatestArticles(limit = 5) {
   } catch (e) { err("getLatestArticles", "Gagal", e); return []; }
 }
 
-// ══════════════════════════════════════════════════════════════
-// NOTIFIKASI WA PUSH
-// ══════════════════════════════════════════════════════════════
-function formatWaMessage(notif) {
-  const emoji = {
-    diagnosis:  "🔬",
-    community:  "💬",
-    market:     "📈",
-    info:       "📢",
-    warning:    "⚠️",
-  }[notif.type] || "🔔";
-  return `${emoji} *${notif.title}*\n\n${notif.body || ""}\n\n_Buka TaniAI Nexus untuk detail selengkapnya._ `.trim();
+function parseNotifBody(raw) {
+  if (!raw) return {};
+  try { return JSON.parse(raw); } catch { /* not JSON, parse plain text */ }
+
+  const result = {};
+
+  const postIdMatch = raw.match(/POST_ID:([\w-]+)/);
+  if (postIdMatch) result.post_id = postIdMatch[1];
+
+  const reportIdMatch = raw.match(/REPORT_ID:([\w-]+)/);
+  if (reportIdMatch) result.report_id = reportIdMatch[1];
+
+  const titleMatch = raw.match(/["""](.{1,100})["""]/);
+  if (titleMatch) result.post_title = titleMatch[1];
+
+  const contentAfterTitle = raw.replace(/POST_ID:[\w-]+/, "").replace(/^[^""\n]+/, "").trim();
+  if (contentAfterTitle.startsWith("—") || contentAfterTitle.startsWith("-")) {
+    result.comment_content = contentAfterTitle.replace(/^[—\-]\s*/, "").trim();
+  }
+
+  const commenterMatch = raw.match(/^(.+?) mengomentari/);
+  if (commenterMatch) result.commenter_name = commenterMatch[1].replace(/^💬\s*/, "").trim();
+
+  const reporterMatch = raw.match(/Laporan dari ([^:]+):/);
+  if (reporterMatch) result.reporter_name = reporterMatch[1].trim();
+
+  const ownerMatch = raw.match(/Postingan.*?"[^"]*".*?oleh (.+?)[\.\n]/);
+  if (ownerMatch) result.post_owner_name = ownerMatch[1].trim();
+
+  const reasonMatch = raw.match(/[Aa]lasan:\s*([^\.\n]+)/);
+  if (reasonMatch) result.reason = reasonMatch[1].trim();
+
+  result.raw = raw;
+  return result;
+}
+
+function formatCommentNotification(body) {
+  const commenterName = body.commenter_name || "Seseorang";
+  const postTitle = body.post_title || "postingan";
+  const commentContent = body.comment_content || "";
+  const postId = body.post_id || "";
+  const appUrl = process.env.FRONTEND_URL || "https://tani-ai-nexus.vercel.app";
+  return `💬 *Komentar Baru*\n\n*${commenterName}* membalas postingan *"${postTitle}"*${commentContent ? `\n\n"${commentContent}"` : ""}\n\n🔗 Buka di Aplikasi:\n${appUrl}/community?post=${postId}\n\n_Balas langsung di WhatsApp untuk berinteraksi lebih lanjut._`;
+}
+
+function formatReportNotification(body) {
+  const appUrl = process.env.FRONTEND_URL || "https://tani-ai-nexus.vercel.app";
+  const postId = body.post_id || "";
+  return `⚠️ *LAPORAN POSTINGAN BARU*\n\n📌 *Dilaporkan oleh:* ${body.reporter_name || "Pengguna"}\n👤 *Pemilik postingan:* ${body.post_owner_name || "Pengguna"}\n📋 *Alasan:* ${body.reason || "Tidak disebutkan"}\n\n🔗 Segera tinjau:\n${appUrl}/admin/reports?post=${postId}`;
+}
+
+function formatWarningNotification(body) {
+  const postTitle = body.post_title || "postingan";
+  const reason = body.reason || "melanggar aturan komunitas";
+  const appUrl = process.env.FRONTEND_URL || "https://tani-ai-nexus.vercel.app";
+  const postId = body.post_id || "";
+  return `⚠️ *Postingan Anda Ditandai*\n\nPostingan *"${postTitle}"* ditandai admin.\n\n📋 *Alasan:* ${reason}\n\n🔗 ${appUrl}/community?post=${postId}`;
+}
+
+function formatGenericNotification(title, body) {
+  const cleanBody = typeof body === "string" ? body : JSON.stringify(body);
+  return `🔔 *${title}*\n\n${cleanBody.substring(0, 300)}`;
 }
 
 export async function getPendingWaNotifications() {
@@ -232,7 +299,7 @@ export async function getPendingWaNotifications() {
       .eq("is_read", false)
       .eq("wa_sent", false)
       .order("created_at", { ascending: true })
-      .limit(20);
+      .limit(50);
     if (error) throw error;
     if (!notifs?.length) return [];
 
@@ -249,14 +316,17 @@ export async function getPendingWaNotifications() {
         await db().from("notifications").update({ wa_sent: true }).eq("id", notif.id);
         continue;
       }
-      results.push({
-        id:           notif.id,
-        phone_number: link.phone_number,
-        title:        notif.title,
-        message:      formatWaMessage(notif),
-      });
+
+      const parsedBody = parseNotifBody(notif.body);
+
+      let message = "";
+      if (notif.type === "community") message = formatCommentNotification(parsedBody);
+      else if (notif.type === "report") message = formatReportNotification(parsedBody);
+      else if (notif.type === "warning") message = formatWarningNotification(parsedBody);
+      else message = formatGenericNotification(notif.title, notif.body);
+
+      results.push({ id: notif.id, phone_number: link.phone_number, title: notif.title, message, type: notif.type });
     }
-    log("getPendingWaNotifications", `${results.length} notif siap dikirim WA`);
     return results;
   } catch (e) { err("getPendingWaNotifications", "Error", e); return []; }
 }
@@ -268,7 +338,6 @@ export async function markNotificationSent(notifId) {
       .update({ wa_sent: true, is_read: true })
       .eq("id", notifId);
     if (error) throw error;
-    log("markNotificationSent", `Notif ${notifId} ditandai terkirim`);
   } catch (e) { err("markNotificationSent", "Error", e); }
 }
 
@@ -280,7 +349,34 @@ export async function createNotification({ user_id, title, body, type = "info" }
       .select()
       .single();
     if (error) throw error;
-    log("createNotification", `Buat notif untuk user ${user_id}: ${title}`);
     return data;
   } catch (e) { err("createNotification", "Error", e); return null; }
+}
+
+export async function createReportNotification({ title, body }) {
+  try {
+    const admins = await getAdminWhatsAppNumbers();
+    if (!admins.length) return null;
+
+    const admin = admins[0]; // karena cuma 1 admin
+
+    const { data, error } = await db()
+      .from("notifications")
+      .insert({
+        user_id: admin.user_id,
+        title,
+        body,
+        type: "report",
+        wa_sent: false,
+        is_read: false
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+    return data;
+  } catch (e) {
+    err("createReportNotification", "Error", e);
+    return null;
+  }
 }

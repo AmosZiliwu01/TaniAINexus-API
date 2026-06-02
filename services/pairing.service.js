@@ -1,15 +1,3 @@
-/**
- * pairing.service.js — REST endpoints untuk web ↔ WA linking
- *
- * CATATAN: dotenv TIDAK perlu dipanggil di sini.
- * Env sudah dimuat oleh config/env.js yang diimport pertama di server.js.
- *
- * Routes:
- *   POST /api/pairing/generate    — web generate kode (butuh user_id)
- *   GET  /api/pairing/status      — web cek status linking user
- *   POST /api/pairing/unlink      — web unlink WA dari akun
- */
-
 import { Router } from "express";
 import { createClient } from "@supabase/supabase-js";
 import {
@@ -19,7 +7,6 @@ import {
 
 const router = Router();
 
-// ── Helper: verifikasi JWT Supabase dari web ──────────────────
 async function getAuthUser(req) {
   const authHeader = req.headers.authorization ?? "";
   const token = authHeader.replace("Bearer ", "").trim();
@@ -55,7 +42,7 @@ router.post("/generate", async (req, res) => {
     return res.json({
       success: true,
       code,
-      expiresInMinutes: 15,
+      expiresInMinutes: 5,
       instruction: `Kirim pesan ini ke WhatsApp bot TaniAI:\n\nLINK ${code}`,
     });
   } catch (e) {
@@ -64,9 +51,7 @@ router.post("/generate", async (req, res) => {
   }
 });
 
-// ──────────────────────────────────────────────
 // GET /api/pairing/status
-// ──────────────────────────────────────────────
 router.get("/status", async (req, res) => {
   try {
     const user = await getAuthUser(req);
@@ -106,9 +91,7 @@ router.get("/status", async (req, res) => {
   }
 });
 
-// ──────────────────────────────────────────────
 // POST /api/pairing/unlink
-// ──────────────────────────────────────────────
 router.post("/unlink", async (req, res) => {
   try {
     const user = await getAuthUser(req);
