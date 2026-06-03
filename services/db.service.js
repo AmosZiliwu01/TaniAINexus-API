@@ -388,7 +388,20 @@ function formatGenericNotification(title, body) {
   return `🔔 *${title}*\n\n${cleanBody.substring(0, 300)}`;
 }
 
-const WA_ALLOWED_TYPES = new Set(["community", "warning", "report"]);
+function formatAccountNotification(title, body) {
+  const parsed = typeof body === "string" ? (() => { try { return JSON.parse(body); } catch { return {}; } })() : body;
+  const action = parsed.action;
+
+  if (action === "blocked") {
+    return `🚫 *Akun Anda Diblokir*\n\nAkun Anda telah diblokir oleh admin *TaniAI Nexus*.\n\nJika Anda merasa ini adalah kesalahan, silakan hubungi administrator.`;
+  }
+  if (action === "unblocked") {
+    return `✅ *Akun Anda Diaktifkan Kembali*\n\nBlokir akun Anda telah dicabut oleh admin *TaniAI Nexus*.\n\nAnda sekarang dapat login kembali ke aplikasi.`;
+  }
+  return `🔔 *${title}*\n\n${parsed.message || ""}`;
+}
+
+const WA_ALLOWED_TYPES = new Set(["community", "warning", "report", "account"]);
 
 // Ambil notifikasi yang belum dikirim ke WA dan format pesannya
 export async function getPendingWaNotifications() {
@@ -431,6 +444,7 @@ export async function getPendingWaNotifications() {
       if (notif.type === "community") message = formatCommentNotification(parsedBody);
       else if (notif.type === "report") message = formatReportNotification(parsedBody);
       else if (notif.type === "warning") message = formatWarningNotification(parsedBody);
+      else if (notif.type === "account") message = formatAccountNotification(notif.title, notif.body);
       else message = formatGenericNotification(notif.title, notif.body);
 
       results.push({
@@ -457,6 +471,19 @@ export async function markNotificationSent(notifId) {
       .eq("wa_sent", false);
     if (error) throw error;
   } catch (e) { err("markNotificationSent", "Error", e); }
+}
+
+// cek status blokir akun user
+export async function isUserBlocked(userId) {
+  try {
+    const { data } = await db()
+      .from("user_roles")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("role", "blocked")
+      .maybeSingle();
+    return !!data;
+  } catch (e) { err("isUserBlocked", "Error", e); return false; }
 }
 
 export async function createNotification({ user_id, title, body, type = "info", is_admin_action_required = false }) {

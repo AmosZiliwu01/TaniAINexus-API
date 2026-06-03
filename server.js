@@ -12,6 +12,7 @@ import {
   getPendingWaNotifications,
   markNotificationSent,
   checkAndIncrementDailyLimit,
+  isUserBlocked
 } from "./services/db.service.js";
 import pairingRouter from "./services/pairing.service.js";
 
@@ -122,6 +123,14 @@ app.post("/api/chat", async (req, res) => {
       return res.json({
         success: true,
         reply: "👋 Halo! Saya TaniAINexus.\n\nUntuk menggunakan layanan ini, kamu perlu menghubungkan WhatsApp ke akun TaniAINexus:\n\n1️⃣ Buka *https://tani-ai-nexus.vercel.app/* kemudian register atau login\n2️⃣ Masuk ke menu *Profil → Hubungkan WhatsApp*\n3️⃣ Salin kode yang muncul (contoh: TANI-483921)\n4️⃣ Kirim pesan: *LINK TANI-483921* ke sini\n\nSetelah terhubung, kamu bisa tanya apa saja seputar pertanian! 🌾",
+      });
+    }
+
+    const blocked = await isUserBlocked(waLink.user_id);
+    if (blocked) {
+      return res.json({
+        success: true,
+        reply: "🚫 *Akun Anda Diblokir*\n\nAkun Anda tidak dapat menggunakan layanan ini karena telah diblokir oleh admin *TaniAI Nexus*.\n\nJika Anda merasa ini adalah kesalahan, silakan hubungi administrator.",
       });
     }
 
