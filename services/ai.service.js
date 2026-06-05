@@ -9,6 +9,8 @@ const groq           = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const PRIMARY_MODEL  = "llama-3.3-70b-versatile";
 const FALLBACK_MODEL = "llama-3.1-8b-instant";
 const VISION_MODEL   = "meta-llama/llama-4-scout-17b-16e-instruct";
+console.log("GROQ KEY:", process.env.GROQ_API_KEY?.slice(0, 15));
+console.log("VISION MODEL:", VISION_MODEL);
 
 function formatDate(dateStr) {
   if (!dateStr) return "-";

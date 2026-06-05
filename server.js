@@ -178,7 +178,7 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ success: false, error: "Internal Server Error" });
 });
 
-app.listen(PORT, async () => {
+app.listen(PORT, "0.0.0.0", async () => {
   console.log(`\n🚀 TaniAPI v5 berjalan di port ${PORT}`);
   console.log(`📡 POST http://localhost:${PORT}/api/chat`);
   console.log(`🔔 GET  http://localhost:${PORT}/api/notifications/pending`);
